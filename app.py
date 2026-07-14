@@ -1,9 +1,7 @@
 """
 app.py
 ------
-Streamlit UI for "Visit Views per SA". All data logic lives in data_logic.py,
-and the styled Excel/HTML report building lives in report_builder.py; this
-file is only responsible for layout, inputs, and rendering.
+Streamlit UI for "Visit Views per SA".
 """
 
 import io
@@ -34,6 +32,14 @@ from data_logic import (
     toggle_columns,
 )
 from report_builder import build_visit_report_workbook, table_to_email
+from email_utils import (
+    DEFAULT_SUBJECT,
+    build_power_automate_export,
+    build_tracker,
+    export_power_automate_excel,
+    load_person_email_map,
+    tracker_to_dataframe,
+)
 
 st.set_page_config(page_title="Visit Views per SA", layout="wide")
 st.title("📍 Visit Views per SA")
@@ -144,20 +150,48 @@ window = DateWindow(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar: Section 4 - bulk emailing sending
+# Sidebar: Section 4 - bulk email prep (Power Automate export settings)
 # ---------------------------------------------------------------------------
-with st.sidebar.expander("4. Send emails", expanded=True):
+with st.sidebar.expander("4. Bulk email prep (Power Automate)", expanded=True):
     report_signature = st.text_input(
         "Sign off name",
         placeholder="e.g., Andrea, Yanni",
         help="Changes the trailing sign-off name at the bottom of the generated email."
     )
 
+    email_subject = st.text_input("Email subject", value=DEFAULT_SUBJECT)
+
+    person_email_file = st.file_uploader(
+        "Person → Email mapping file",
+        type=["csv", "xlsx", "xls"],
+        key="person_email_file",
+        help=(
+            "One flat mapping covering BOTH agents and superiors. Must "
+            "contain a 'Person' column and an 'Email' column. Used to look "
+            "up each agent's own address, and to CC that agent's own "
+            "superior automatically."
+        ),
+    )
+
+    default_cc_input = st.text_area(
+        "Default CC (comma-separated emails)",
+        placeholder="e.g., ops@company.com, msme.team@company.com",
+        help="Added to every row's CC in addition to that agent's own superior.",
+    )
+    default_cc_list = [e.strip() for e in default_cc_input.split(",") if e.strip()]
+
 
 # ---------------------------------------------------------------------------
 # Build the base output table (filters + visit join + dtypes), independent
 # of sort/column-visibility choices made inside the Table View tab.
 # ---------------------------------------------------------------------------
+person_email_map = {}
+if person_email_file is not None:
+    try:
+        person_email_map = load_person_email_map(person_email_file)
+    except Exception as exc:
+        st.sidebar.error(f"⚠️ Could not read person email mapping: {exc}")
+
 try:
     filtered_data = filter_reference_data(reference_data, dss_filter, agents_filter, window)
     result = attach_visit_status(filtered_data, form_data)
@@ -174,8 +208,8 @@ except KeyError as exc:
 # ---------------------------------------------------------------------------
 # Main panel: tabs (order: Table View, Email-Ready View, Statistics & Options)
 # ---------------------------------------------------------------------------
-tab_table, tab_email, tab_stats = st.tabs(
-    ["📋 Table View", "✉️ Email-Ready View", "📊 Statistics & Options"]
+tab_table, tab_email, tab_stats, tab_bulk = st.tabs(
+    ["📋 Table View", "✉️ Email-Ready View", "📊 Statistics & Options", "📨 Bulk Email Tracker"]
 )
 
 # --- Table View tab: column/sort controls are defined here first, since --
@@ -204,9 +238,9 @@ with tab_table:
         display_df = sort_output(display_df, sort_col, ascending)
 
         st.dataframe(style_output_table(display_df), use_container_width=True, hide_index=True)
-        
+
         report_wb, report_bytes, report_html = build_visit_report_workbook(
-            display_df, report_date=selection_date
+            display_df#, report_date=selection_date
         )
         st.download_button(
             "⬇️ Download table as Excel (.xlsx)",
@@ -226,7 +260,7 @@ with tab_email:
     else:
         # components.html(report_html, height=600, scrolling=True)
         email_html = table_to_email(report_html, agent=agents_filter, report_signature=report_signature)
-        
+
         st.components.v1.html(email_html, height=600, scrolling=True)
 
         st.download_button(
@@ -268,9 +302,95 @@ with tab_stats:
         m4.metric("🔴 Due in 0-2 days", int(due_soon_red))
         m5.metric("🟡 Due in 3-5 days", int(due_soon_yellow))
 
-        st.caption(
-            "🔴 rows are due in 0-2 days, 🟡 rows are due in 3-5 days "
-            "(see the Email-Ready View and Table View tabs). "
-            f"'{CLEAN_SUPERIOR_COL}' is hidden from the Table View by default — "
-            "toggle it on there if needed."
+# ---------------------------------------------------------------------------
+# Bulk Email Tracker tab
+# ---------------------------------------------------------------------------
+with tab_bulk:
+    st.subheader("Bulk email tracker")
+
+    # Everything that affects the tracker's contents. Any change to these
+    # widgets automatically re-runs Streamlit's script top-to-bottom, so we
+    # simply recompute the tracker whenever this signature changes — no
+    # separate 'Prepare tracker' click is required.
+    bulk_settings_sig = (
+        window.start_date, window.end_date, visit_inclusion,
+        tuple(sorted(person_email_map.items())),
+        email_subject, tuple(default_cc_list), report_signature,
+        id(reference_data), id(form_data),
+    )
+
+    if st.session_state.get("bulk_settings_sig") != bulk_settings_sig:
+        st.session_state.bulk_jobs = build_tracker(
+            reference_data=reference_data,
+            form_data=form_data,
+            dss_filter="All",
+            window=window,
+            visit_inclusion=visit_inclusion,
+            person_email_map=person_email_map,
+            subject=email_subject,
+            default_cc_list=default_cc_list,
+            report_signature=report_signature,
         )
+        st.session_state.bulk_settings_sig = bulk_settings_sig
+        # Any previously edited export table is now stale.
+        st.session_state.pop("bulk_export_df", None)
+
+    jobs = st.session_state.get("bulk_jobs", [])
+
+    st.dataframe(
+        tracker_to_dataframe(jobs),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if jobs:
+        ready = sum(1 for j in jobs if j.status == "Ready")
+        missing = sum(1 for j in jobs if j.status == "Missing email")
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Total agents", len(jobs))
+        s2.metric("Ready for export", ready)
+        s3.metric("⚠️ Missing email", missing)
+
+        st.divider()
+        st.markdown("**Export queue for Power Automate**")
+        st.caption(
+            "Edit any cell below if needed (e.g. tweak a Subject or CC) — "
+            "your edits are reflected in the downloaded file."
+        )
+
+        base_export_df = build_power_automate_export(jobs)
+
+        # Preserve edits across reruns unless the underlying tracker changed.
+        if "bulk_export_df" not in st.session_state:
+            st.session_state.bulk_export_df = base_export_df
+
+        edited_export_df = st.data_editor(
+            st.session_state.bulk_export_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key="bulk_export_editor",
+            column_config={
+                "HTMLBody": st.column_config.TextColumn(
+                    "HTMLBody", help="Full HTML email body (long — scroll to see)."
+                ),
+            },
+        )
+        st.session_state.bulk_export_df = edited_export_df
+
+        export_bytes = export_power_automate_excel(edited_export_df)
+        st.download_button(
+            "⬇️ Download AgentEmailQueue.xlsx",
+            data=export_bytes,
+            file_name="AgentEmailQueue.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        st.caption(
+            "Drop this file into the OneDrive/SharePoint folder your "
+            "Power Automate flow watches. The flow sends each row via "
+            "your own Outlook mailbox, using the To/CC/Subject/HTMLBody "
+            "columns above."
+        )
+    else:
+        st.info("No agents with rows found for the current date window / row-inclusion setting.")

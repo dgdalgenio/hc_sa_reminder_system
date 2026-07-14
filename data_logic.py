@@ -2,8 +2,7 @@
 data_logic.py
 --------------
 All data loading, cleaning, merging, and filtering logic for the
-"Visit Views per SA" app lives here. app.py should only be a thin
-Streamlit wrapper around these functions.
+"Visit Views per SA" app lives here.
 
 Expected inputs
 ----------------

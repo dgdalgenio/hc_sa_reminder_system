@@ -2,8 +2,7 @@
 report_builder.py
 ------------------
 Builds the styled "Visit Views per SA" Excel workbook and converts it into
-HTML (via xlsx2html) for the email-ready view and Excel download, mirroring
-the styling conventions used by excel_report.py / email_template.py.
+HTML (via xlsx2html) for the email-ready view and Excel download.
 """
 
 import io
@@ -42,7 +41,7 @@ def _to_native(value):
     return value
 
 
-def build_visit_report_workbook(df: pd.DataFrame, report_date=None):
+def build_visit_report_workbook(df: pd.DataFrame):
     """
     Build the styled Visit Views workbook.
 
@@ -158,11 +157,11 @@ def table_to_email(table_html, agent='Agent', report_signature=None):
     <body>
     <div class="container">
     <b>Magandang araw, {agent}! 🙂</b>
-    <p>&nbsp;</p>
+
     <p>Salamat sa iyong suporta at pag-aasikaso sa ating mga customer. Malaking tulong ang ginagawa mo para mas makapagserbisyo tayo sa kanila.</p>
-    <p>&nbsp;</p>
+
     <p>Para mas mapatatag pa natin ang relasyon sa ating mga kliyente, pinaaalala namin ang <b><u> personal mong pagbisita sa mga customer</u></b> na nasa attachment dahil may paparating silang due dates.</p>
-    <p>&nbsp;</p>
+
     <div class="highlight">
         Para sa buwan na ito, <b><u> mandatory ang face to face visits at ito ang dapat unahin</u></b>. 
         Dapat mong dalawin ang kanilang mga tindahan, kumustahin sila, at kausapin tungkol sa kanilang nalalapit na bayarin.
@@ -174,10 +173,9 @@ def table_to_email(table_html, agent='Agent', report_signature=None):
         <u>Hindi mo kailangan</u> o dapat singilin sila kapag nahuli sila sa bayad. 
         May hiwalay na team ang Home Credit para sa ganitong mga sitwasyon.
     </b></p></span>
-    <p>&nbsp;</p>
+
     <p>Kung sakaling hindi agad posible ang face to face visit, maaari mo silang tawagan bilang pangalawang opsyon.</p>
-    <p>&nbsp;</p>
-    <p>&nbsp;</p>
+
     <p><b>Sa pagbisita o pagtawag, pakisuri ang mga sumusunod:</b></p>
     <ul>
         <li>Kumusta ang customer</li>
@@ -185,26 +183,23 @@ def table_to_email(table_html, agent='Agent', report_signature=None):
         <li>Kailangan ba nila ng tulong sa pag-navigate ng proseso ng pagbabayad</li>
         <li>Kailangan ba nila ng tulong para makontak ang customer support</li>
     </ul>
-    <p>&nbsp;</p>
-    <p>&nbsp;</p>
+
     <p>Naka-attach ang kanilang mga pangalan at contract details para sa iyong gabay.</p>
 
     <div style="overflow-x:auto;">
     {table_html}
     </div>
-    <p>&nbsp;</p>
-    <p>&nbsp;</p>
+
     <p><b><u>
         Pagkatapos mong makapag-check in, pakifill out ang short survey 
         <a href="https://forms.office.com/pages/responsepage.aspx?id=28KJynnWnUiJ-ySGzZre1O5YneIZopZOjWlglhamDPlUMTJQMlZHRUhGSDhZMVFWWEhCNkxVUVNRViQlQCN0PWcu">(MS Form link)</a> 
         para mas ma-monitor at masuportahan namin ang iyong mga follow up.
     </u></b></p>
-    <p>&nbsp;</p>
+
     <p>Sana makatulong ito para mas maging maayos at mas maging malapit pa ang pakikipag-ugnayan mo sa ating mga customer.</p>
-    <p>&nbsp;</p>
+
     <p class="footer">Maraming salamat, at ingat ka palagi! 😊<br>
-    <p>&nbsp;</p>
-    <p>&nbsp;</p>
+
     <strong>{report_signature}</strong></p>
     </div>
     </body>
