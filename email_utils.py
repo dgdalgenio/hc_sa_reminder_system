@@ -20,6 +20,7 @@ from data_logic import (
     coerce_display_dtypes,
     filter_by_visit_status,
     filter_reference_data,
+    toggle_columns,
 )
 
 from report_builder import build_email_table_html
@@ -111,6 +112,8 @@ def build_tracker(
     subject: str = DEFAULT_SUBJECT,
     default_cc_list: Optional[list] = None,
     report_signature: str = "MSME Team",  # unused now — HTMLBody is table-only, no greeting
+    include_superior: bool = False,
+    include_agent: bool = True,
 ) -> list:
     """
     For every agent that falls under the current DSS/Superior filter (across
@@ -119,6 +122,11 @@ def build_tracker(
     with the styled table HTML (no greeting) ready for the Power Automate
     export. `report_signature` is accepted for call-site compatibility but
     no longer used, since the flow's own template supplies the greeting.
+
+    `include_superior` / `include_agent` mirror the "Show 'Superior' column"
+    / "Show 'Agent' column" toggles in the Table View tab — they control
+    whether those columns appear in the exported HTMLBody table, same as
+    they do for the on-screen display table.
 
     Each job's CC list is: [the agent's own superior's email (if found in
     the mapping)] + default_cc_list (deduped, agent's own To address
@@ -150,6 +158,9 @@ def build_tracker(
         result_clean = clean_output_columns(result)
         result_clean = filter_by_visit_status(result_clean, visit_inclusion)
         result_clean = coerce_display_dtypes(result_clean)
+        result_clean = toggle_columns(
+            result_clean, include_superior=include_superior, include_agent=include_agent
+        )
 
         if result_clean.empty:
             # Only include agents with a nonzero number of rows.

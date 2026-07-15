@@ -1,11 +1,13 @@
 """
 app.py
 ------
-Streamlit UI for "Visit Views per SA".
+Streamlit UI for "Visit Views per SA". All data logic lives in data_logic.py,
+and the styled Excel/HTML report building lives in report_builder.py; this
+file is only responsible for layout, inputs, and rendering.
 """
 
 import io
-from datetime import date
+from datetime import date, datetime
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -302,11 +304,26 @@ with tab_stats:
         m4.metric("🔴 Due in 0-2 days", int(due_soon_red))
         m5.metric("🟡 Due in 3-5 days", int(due_soon_yellow))
 
+        st.caption(
+            "🔴 rows are due in 0-2 days, 🟡 rows are due in 3-5 days "
+            "(see the Email-Ready View and Table View tabs). "
+            f"'{CLEAN_SUPERIOR_COL}' is hidden from the Table View by default — "
+            "toggle it on there if needed."
+        )
+
 # ---------------------------------------------------------------------------
 # Bulk Email Tracker tab
 # ---------------------------------------------------------------------------
 with tab_bulk:
     st.subheader("Bulk email tracker")
+
+    col_a, col_b = st.columns(2)
+    bulk_show_superior = col_a.checkbox(
+        "Show 'Superior' column (in emailed table)", value=False, key="bulk_show_superior"
+    )
+    bulk_show_agent = col_b.checkbox(
+        "Show 'Agent' column (in emailed table)", value=True, key="bulk_show_agent"
+    )
 
     # Everything that affects the tracker's contents. Any change to these
     # widgets automatically re-runs Streamlit's script top-to-bottom, so we
@@ -316,6 +333,7 @@ with tab_bulk:
         window.start_date, window.end_date, visit_inclusion,
         tuple(sorted(person_email_map.items())),
         email_subject, tuple(default_cc_list), report_signature,
+        bulk_show_superior, bulk_show_agent,
         id(reference_data), id(form_data),
     )
 
@@ -330,6 +348,8 @@ with tab_bulk:
             subject=email_subject,
             default_cc_list=default_cc_list,
             report_signature=report_signature,
+            include_superior=bulk_show_superior,
+            include_agent=bulk_show_agent,
         )
         st.session_state.bulk_settings_sig = bulk_settings_sig
         # Any previously edited export table is now stale.
@@ -379,10 +399,12 @@ with tab_bulk:
         st.session_state.bulk_export_df = edited_export_df
 
         export_bytes = export_power_automate_excel(edited_export_df)
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
+        queue_filename = f"{timestamp} AgentEmailQueue.xlsx"
         st.download_button(
-            "⬇️ Download AgentEmailQueue.xlsx",
+            f"⬇️ Download {queue_filename}",
             data=export_bytes,
-            file_name="AgentEmailQueue.xlsx",
+            file_name=queue_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
@@ -394,3 +416,23 @@ with tab_bulk:
         )
     else:
         st.info("No agents with rows found for the current date window / row-inclusion setting.")
+        
+st.markdown(
+    """
+    <style>
+    .footer {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        text-align: center;
+        padding: 10px;
+        font-size: 14px;
+    }
+    </style>
+    <div class="footer">
+        © July 2026, by Deanne Algenio
+    </div>
+    """,
+    unsafe_allow_html=True
+)
