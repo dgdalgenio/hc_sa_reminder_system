@@ -143,6 +143,93 @@ def build_visit_report_workbook(df: pd.DataFrame):
     return wb, raw_xlsx_bytes, excel_html_content
 
 
+def _escape_html(value) -> str:
+    """Minimal HTML-escaping for cell text (avoids pulling in a templating lib)."""
+    if value is None:
+        return ""
+    s = str(value)
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def build_email_table_html(df: pd.DataFrame) -> str:
+    """
+    Build a compact HTML table for embedding directly in the email body /
+    Power Automate 'HTMLBody' column.
+
+    Unlike xlsx2html's output (which repeats a full inline `style="..."` on
+    every single <td>, ballooning a ~30-row x 8-col table to 40-60k+
+    characters), this uses ONE shared <style> block with a couple of
+    reusable classes. That keeps the whole table comfortably under Excel's
+    32,767-character-per-cell limit, which is what was silently truncating
+    the table when it was written into the AgentEmailQueue export sheet.
+
+    Visually matches build_visit_report_workbook():
+      - bold header row, filled background
+      - thin light-grey borders
+      - light red / light yellow row highlighting for accounts due in
+        0-2 / 3-5 days (via CLEAN_DAYS_TO_INST_COL)
+      - peso currency format for Instalment, plain integer for
+        Days to Instalment / Contact Phone
+    """
+    if df.empty:
+        return "<p><i>No rows to display.</i></p>"
+
+    columns = list(df.columns)
+
+    style = f"""
+    <style>
+      .vv-table {{ border-collapse: collapse; font-family: {FONT_FAMILY}, Arial, sans-serif; font-size: 13px; color: #333333; }}
+      .vv-table th {{ background-color: #EEECE1; color: #1B365D; font-weight: bold; border: 1px solid #D9D9D9; padding: 6px 8px; text-align: center; }}
+      .vv-table th:first-child {{ text-align: left; }}
+      .vv-table td {{ border: 1px solid #D9D9D9; padding: 6px 8px; text-align: center; }}
+      .vv-table td:first-child {{ text-align: left; }}
+      .vv-table td.num {{ text-align: right; }}
+      .vv-table tr.red td {{ background-color: #{COLOR_RED}; }}
+      .vv-table tr.yellow td {{ background-color: #{COLOR_YELLOW}; }}
+    </style>
+    """
+
+    header_cells = "".join(f"<th>{_escape_html(col)}</th>" for col in columns)
+    header_html = f"<tr>{header_cells}</tr>"
+
+    row_chunks = []
+    for _, row in df.iterrows():
+        bucket = (
+            _days_to_inst_bucket(row[CLEAN_DAYS_TO_INST_COL])
+            if CLEAN_DAYS_TO_INST_COL in df.columns
+            else None
+        )
+        row_class = f' class="{bucket}"' if bucket in ("red", "yellow") else ""
+
+        cells = []
+        for col in columns:
+            value = _to_native(row[col])
+            if col == CLEAN_INSTALMENT_COL and value is not None:
+                try:
+                    text = f"\u20b1{float(value):,.0f}"
+                except (TypeError, ValueError):
+                    text = _escape_html(value)
+                cells.append(f'<td class="num">{text}</td>')
+            elif col in (CLEAN_DAYS_TO_INST_COL, CLEAN_CONTACT_PHONE_COL) and value is not None:
+                try:
+                    text = f"{int(float(value))}"
+                except (TypeError, ValueError):
+                    text = _escape_html(value)
+                cells.append(f"<td>{text}</td>")
+            else:
+                cells.append(f"<td>{_escape_html(value)}</td>")
+        row_chunks.append(f"<tr{row_class}>{''.join(cells)}</tr>")
+
+    table_html = (
+        f'{style}<table class="vv-table">{header_html}{"".join(row_chunks)}</table>'
+    )
+    return table_html
+
+
 def table_to_email(table_html, agent='Agent', report_signature=None):
     if not report_signature:
         report_signature = 'MSME Team'

@@ -22,7 +22,7 @@ from data_logic import (
     filter_reference_data,
 )
 
-from report_builder import build_visit_report_workbook
+from report_builder import build_email_table_html
 
 DEFAULT_SUBJECT = "PAALALA: Mga Due Date ng Client Repayment + Store Visit Check-in Survey"
 
@@ -91,9 +91,14 @@ def _build_html_body(job_display_df: pd.DataFrame) -> str:
     Build just the styled table HTML (no greeting/template wrapper) — the
     Power Automate flow supplies its own email body/greeting and only needs
     the table itself dropped in.
+
+    Uses build_email_table_html() (a single shared <style> block + a couple
+    of CSS classes) rather than the xlsx2html-based workbook HTML, which
+    repeats a full inline style="..." on every <td> and can push a ~30-row
+    table past Excel's 32,767-character-per-cell limit, silently truncating
+    it once stored in the AgentEmailQueue export sheet.
     """
-    _, _, report_html = build_visit_report_workbook(job_display_df)
-    return report_html
+    return build_email_table_html(job_display_df)
 
 
 def build_tracker(
@@ -208,11 +213,35 @@ def build_power_automate_export(jobs: list) -> pd.DataFrame:
 
 
 def export_power_automate_excel(export_df: pd.DataFrame) -> bytes:
-    """Return the (possibly user-edited) export DataFrame as .xlsx bytes."""
+    """
+    Return the (possibly user-edited) export DataFrame as .xlsx bytes.
+
+    Wraps the written range in a real Excel Table object (openpyxl
+    Table/TableStyleInfo) named "AgentEmailQueue" — plain to_excel() only
+    writes a bare range of cells, which leaves Power Automate's "List rows
+    present in a table" step with nothing to select in its Table dropdown.
+    """
     import io as _io
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+
     buf = _io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="AgentEmailQueue")
+        ws = writer.sheets["AgentEmailQueue"]
+
+        n_rows, n_cols = export_df.shape
+        if n_rows > 0 and n_cols > 0:
+            last_col_letter = get_column_letter(n_cols)
+            table_ref = f"A1:{last_col_letter}{n_rows + 1}"  # +1 for header row
+
+            table = Table(displayName="AgentEmailQueue", ref=table_ref)
+            table.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium2",
+                showRowStripes=True,
+            )
+            ws.add_table(table)
+
     buf.seek(0)
     return buf.getvalue()
 

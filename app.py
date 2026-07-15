@@ -394,23 +394,3 @@ with tab_bulk:
         )
     else:
         st.info("No agents with rows found for the current date window / row-inclusion setting.")
-
-st.markdown(
-    """
-    <style>
-    .footer {
-        position: fixed;
-        left: 0;
-        bottom: 0;
-        width: 100%;
-        text-align: center;
-        padding: 10px;
-        font-size: 14px;
-    }
-    </style>
-    <div class="footer">
-        © July 2026, by Deanne Algenio
-    </div>
-    """,
-    unsafe_allow_html=True
-)
