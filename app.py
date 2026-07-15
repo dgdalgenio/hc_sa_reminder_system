@@ -43,8 +43,8 @@ from email_utils import (
     tracker_to_dataframe,
 )
 
-st.set_page_config(page_title="Visit Views per SA", layout="wide")
-st.title("📍 Visit Views per SA")
+st.set_page_config(page_icon='📅', page_title="SA Visits Email Reminders", layout="wide")
+st.title("📧 SA Visits Email Reminders")
 st.caption(
     "Upload addresses, contracts, and visit-report (form) data to see which "
     "accounts have been visited, filtered by DSS, agent, and instalment date."
