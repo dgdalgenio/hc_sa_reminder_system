@@ -39,6 +39,7 @@ SUPERIOR_COL = "SUPERIOR"
 AGENT_COL = "AGENT"
 DATE_COL = "INST. DATE"
 DAYS_TO_INST_COL = "DAYS TO INST"
+PAID_COL = "PAID"
 
 FORM_CONTRACT_COL = "Input contract number (Copy it out from the form to reduce errors)"
 FORM_VISIT_DATE_COL = "When did you visit?"
@@ -53,6 +54,7 @@ REQUIRED_CONTRACT_COLS = {
     "INSTALMENT",
     DATE_COL,
     DAYS_TO_INST_COL,
+    PAID_COL,
     "CONTACT PHONE",
 }
 REQUIRED_FORM_COLS = {FORM_CONTRACT_COL, FORM_VISIT_DATE_COL}
@@ -67,6 +69,7 @@ OUTPUT_COLUMN_ORDER = [
     "INSTALMENT",
     DATE_COL,
     DAYS_TO_INST_COL,
+    PAID_COL,
     "Visited?",
     "Date of visit",
     "Visit Status",
@@ -85,6 +88,7 @@ CLEAN_COLUMN_NAMES = {
     "INSTALMENT": "Instalment",
     DATE_COL: "Instalment Date",
     DAYS_TO_INST_COL: "Days to Instalment",
+    PAID_COL: "Paid",
     "Visited?": "Visited?",
     "Date of visit": "Date of Visit",
     "Visit Status": "Visit Status",
@@ -103,12 +107,27 @@ CLEAN_INSTALMENT_COL = CLEAN_COLUMN_NAMES["INSTALMENT"]
 CLEAN_CONTACT_PHONE_COL = CLEAN_COLUMN_NAMES["CONTACT PHONE"]
 CLEAN_SUPERIOR_COL = CLEAN_COLUMN_NAMES[SUPERIOR_COL]
 CLEAN_AGENT_COL = CLEAN_COLUMN_NAMES[AGENT_COL]
+CLEAN_PAID_COL = CLEAN_COLUMN_NAMES[PAID_COL]
 
 # Row-highlight thresholds (in days to instalment due)
 DUE_SOON_RED_RANGE = (0, 2)   # light red
 DUE_SOON_YELLOW_RANGE = (3, 5)  # light yellow
 COLOR_RED = "FFCCCC"
 COLOR_YELLOW = "FFF3B0"
+
+# ---------------------------------------------------------------------------
+# Visit-status-per-DSS ("visit stats") constants
+# ---------------------------------------------------------------------------
+VISIT_STATUS_COL = "Visit Status"  # produced by attach_visit_status()
+VISIT_STATUS_NOT_VISITED = "not visited"
+
+STATS_AGENT_COL = "Agent"
+STATS_TOTAL_DUE_COL = "Total Due Dates"
+STATS_MISSED_COL = "Missed Visits"
+STATS_COVERAGE_COL = "% Visits Covered"
+
+WEIGHTED_AVERAGE_LABEL = "\u2696\ufe0f Weighted Average"
+DEFAULT_OVERDUE_LOOKBACK_DAYS = 20
 
 
 class DataLoadError(Exception):
@@ -205,6 +224,26 @@ def load_addresses(file) -> pd.DataFrame:
     return df
 
 
+PAID_YES_VALUES = {"1", "1.0", "yes", "y", "true", "paid"}
+PAID_NO_VALUES = {"0", "0.0", "no", "n", "false", "unpaid"}
+
+
+def _coerce_paid_to_yes_no(value):
+    """
+    Normalize a binary/varied 'PAID' cell (0/1, True/False, 'Yes'/'No', ...)
+    into a plain 'Yes' / 'No' string. Unrecognized non-null values are left
+    as-is rather than silently dropped, so bad source data stays visible.
+    """
+    if pd.isna(value):
+        return pd.NA
+    text = str(value).strip().lower()
+    if text in PAID_YES_VALUES:
+        return "Yes"
+    if text in PAID_NO_VALUES:
+        return "No"
+    return value
+
+
 def load_contracts(file) -> pd.DataFrame:
     df = read_any_table(file, label="contracts data")
     df = _strip_whitespace_columns(df)
@@ -216,6 +255,7 @@ def load_contracts(file) -> pd.DataFrame:
     df[CONTRACT_COL] = df[CONTRACT_COL].astype(str).str.strip()
     df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
     df[DAYS_TO_INST_COL] = pd.to_numeric(df[DAYS_TO_INST_COL], errors="coerce")
+    df[PAID_COL] = df[PAID_COL].apply(_coerce_paid_to_yes_no)
     return df
 
 
@@ -295,6 +335,30 @@ def filter_reference_data(
     return filtered
 
 
+def filter_reference_data_by_scope(
+    reference_data: pd.DataFrame,
+    dss_filter: Optional[str],
+    agents_filter: Optional[str],
+) -> pd.DataFrame:
+    """
+    Same DSS/agent scoping as filter_reference_data(), but WITHOUT the date
+    window mask. Used by the visit-stats tab, which looks back from each
+    row's own 'DAYS TO INST' rather than from the sidebar's date window.
+    """
+    if reference_data.empty:
+        return reference_data.copy()
+
+    mask = pd.Series(True, index=reference_data.index)
+
+    if dss_filter and dss_filter != "All":
+        mask &= (reference_data[SUPERIOR_COL] == dss_filter) | (reference_data[AGENT_COL] == dss_filter)
+
+    if agents_filter and agents_filter != "All":
+        mask &= reference_data[AGENT_COL] == agents_filter
+
+    return reference_data.loc[mask].copy()
+
+
 def attach_visit_status(filtered_data: pd.DataFrame, form_data: pd.DataFrame) -> pd.DataFrame:
     """
     Select the output columns, join against the visit-report form data, and
@@ -308,6 +372,7 @@ def attach_visit_status(filtered_data: pd.DataFrame, form_data: pd.DataFrame) ->
         "INSTALMENT",
         DATE_COL,
         DAYS_TO_INST_COL,
+        PAID_COL,
         "CONTACT PHONE",
         "City",
         "Barangay",
@@ -357,6 +422,170 @@ def filter_by_visit_status(df: pd.DataFrame, include: str) -> pd.DataFrame:
     if include == "Not visited only":
         return df[df[CLEAN_VISITED_COL] == "No"].copy()
     raise ValueError(f"Unknown visit-status filter: {include!r}")
+
+
+# ---------------------------------------------------------------------------
+# Visit-status-per-DSS ("visit stats") pipeline
+#
+# Ports the logic from visit_stats_peragent.ipynb: for accounts overdue by
+# at least `lookback_days` (DAYS TO INST <= -lookback_days), what fraction
+# of them has each agent actually visited? The notebook's approach checked
+# out, so this mirrors it — reusing attach_visit_status() for the visit join
+# rather than re-deriving it, and adding a weighted-average rollup.
+# ---------------------------------------------------------------------------
+
+def compute_agent_visit_stats(
+    scoped_reference_data: pd.DataFrame,
+    form_data: pd.DataFrame,
+    lookback_days: int,
+) -> pd.DataFrame:
+    """
+    For each agent in scoped_reference_data, compute visit coverage among
+    that agent's accounts overdue by at least `lookback_days`
+    (DAYS TO INST <= -lookback_days).
+
+    Returns one row per agent that has at least one such overdue account,
+    with columns: STATS_AGENT_COL, STATS_TOTAL_DUE_COL, STATS_MISSED_COL,
+    STATS_COVERAGE_COL (fraction, 0-1). Agents with zero overdue accounts
+    are omitted here — the caller can diff against the full agent roster to
+    report those separately. Rows with a missing/NaN agent are dropped.
+    """
+    empty_result = pd.DataFrame(
+        columns=[STATS_AGENT_COL, STATS_TOTAL_DUE_COL, STATS_MISSED_COL, STATS_COVERAGE_COL]
+    )
+    if scoped_reference_data.empty:
+        return empty_result
+
+    merged = attach_visit_status(scoped_reference_data, form_data)
+    merged = merged[merged[AGENT_COL].notna()]
+
+    overdue = merged[merged[DAYS_TO_INST_COL] <= -lookback_days]
+    if overdue.empty:
+        return empty_result
+
+    grouped = overdue.groupby(AGENT_COL, dropna=True)
+    records = []
+    for agent, group in grouped:
+        total_due = len(group)
+        missed = int((group[VISIT_STATUS_COL] == VISIT_STATUS_NOT_VISITED).sum())
+        coverage = 1 - (missed / total_due)
+        records.append(
+            {
+                STATS_AGENT_COL: agent,
+                STATS_TOTAL_DUE_COL: total_due,
+                STATS_MISSED_COL: missed,
+                STATS_COVERAGE_COL: coverage,
+            }
+        )
+
+    result = pd.DataFrame(records).sort_values(by=STATS_AGENT_COL).reset_index(drop=True)
+    return result
+
+
+def compute_weighted_average_coverage(stats_df: pd.DataFrame) -> Optional[float]:
+    """
+    Weighted average visit-coverage across all agents in stats_df, weighted
+    by each agent's Total Due Dates (not a plain average of percentages).
+    Returns None if there are no due dates to weight by.
+    """
+    if stats_df.empty:
+        return None
+    total_due = stats_df[STATS_TOTAL_DUE_COL].sum()
+    if total_due == 0:
+        return None
+    total_missed = stats_df[STATS_MISSED_COL].sum()
+    return 1 - (total_missed / total_due)
+
+
+def append_weighted_average_row(stats_df: pd.DataFrame) -> pd.DataFrame:
+    """Append a bottom 'Weighted Average' summary row to a per-agent stats table."""
+    if stats_df.empty:
+        return stats_df
+
+    total_due = int(stats_df[STATS_TOTAL_DUE_COL].sum())
+    total_missed = int(stats_df[STATS_MISSED_COL].sum())
+    weighted_avg = compute_weighted_average_coverage(stats_df)
+
+    summary_row = pd.DataFrame(
+        [
+            {
+                STATS_AGENT_COL: WEIGHTED_AVERAGE_LABEL,
+                STATS_TOTAL_DUE_COL: total_due,
+                STATS_MISSED_COL: total_missed,
+                STATS_COVERAGE_COL: weighted_avg,
+            }
+        ]
+    )
+    return pd.concat([stats_df, summary_row], ignore_index=True)
+
+
+@dataclass
+class DssVisitStats:
+    """Visit-stats results for a single DSS/Superior group."""
+    superior: str
+    stats_df: pd.DataFrame           # per-agent rows, no weighted-average row
+    agents_with_no_due_dates: list
+    weighted_average_coverage: Optional[float]
+
+
+def compute_visit_stats_by_dss(
+    reference_data: pd.DataFrame,
+    form_data: pd.DataFrame,
+    dss_filter: Optional[str],
+    agents_filter: Optional[str],
+    lookback_days: int,
+) -> list:
+    """
+    Build one DssVisitStats per DSS/Superior in scope. If dss_filter == "All",
+    this produces one entry per superior found in reference_data; otherwise
+    a single-entry list for that DSS. agents_filter narrows every group down
+    to that one agent (mirrors the sidebar's Agent filter).
+    """
+    superiors = get_superior_options(reference_data) if (not dss_filter or dss_filter == "All") else [dss_filter]
+
+    results = []
+    for superior in superiors:
+        scoped = filter_reference_data_by_scope(reference_data, superior, agents_filter)
+        scoped_agents = sorted(scoped[AGENT_COL].dropna().unique().tolist())
+
+        stats_df = compute_agent_visit_stats(scoped, form_data, lookback_days)
+        agents_with_due = set(stats_df[STATS_AGENT_COL]) if not stats_df.empty else set()
+        agents_with_no_due_dates = [a for a in scoped_agents if a not in agents_with_due]
+
+        results.append(
+            DssVisitStats(
+                superior=str(superior),
+                stats_df=stats_df,
+                agents_with_no_due_dates=agents_with_no_due_dates,
+                weighted_average_coverage=compute_weighted_average_coverage(stats_df),
+            )
+        )
+    return results
+
+
+def style_visit_stats_table(df: pd.DataFrame):
+    """
+    Return a pandas Styler for a per-agent visit-stats table: percentage
+    formatting for the coverage column, plain integers for the count
+    columns, and a bolded/highlighted bottom row for the weighted average
+    (if present, identified by WEIGHTED_AVERAGE_LABEL).
+    """
+    if df.empty:
+        return df.style
+
+    def _summary_row_style(row):
+        if row.get(STATS_AGENT_COL) == WEIGHTED_AVERAGE_LABEL:
+            return ["font-weight: bold; background-color: #EEECE1"] * len(row)
+        return [""] * len(row)
+
+    styler = df.style.apply(_summary_row_style, axis=1)
+
+    fmt = {
+        STATS_TOTAL_DUE_COL: lambda v: f"{int(v)}" if pd.notna(v) else "",
+        STATS_MISSED_COL: lambda v: f"{int(v)}" if pd.notna(v) else "",
+        STATS_COVERAGE_COL: lambda v: f"{v:.1%}" if pd.notna(v) else "\u2014",
+    }
+    return styler.format(fmt)
 
 
 def sort_output(df: pd.DataFrame, sort_col: Optional[str], ascending: bool) -> pd.DataFrame:

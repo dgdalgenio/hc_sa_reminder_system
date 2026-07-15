@@ -16,12 +16,15 @@ from data_logic import (
     CLEAN_DAYS_TO_INST_COL,
     CLEAN_SUPERIOR_COL,
     CLEAN_VISITED_COL,
+    DEFAULT_OVERDUE_LOOKBACK_DAYS,
     DataLoadError,
     DateWindow,
+    append_weighted_average_row,
     attach_visit_status,
     build_reference_data,
     clean_output_columns,
     coerce_display_dtypes,
+    compute_visit_stats_by_dss,
     filter_by_visit_status,
     filter_reference_data,
     get_agent_options,
@@ -31,6 +34,7 @@ from data_logic import (
     load_form_data,
     sort_output,
     style_output_table,
+    style_visit_stats_table,
     toggle_columns,
 )
 from report_builder import build_visit_report_workbook, table_to_email
@@ -43,8 +47,8 @@ from email_utils import (
     tracker_to_dataframe,
 )
 
-st.set_page_config(page_icon='📅', page_title="SA Visits Email Reminders", layout="wide")
-st.title("📧 SA Visits Email Reminders")
+st.set_page_config(page_title="Visit Views per SA", layout="wide")
+st.title("📍 Visit Views per SA")
 st.caption(
     "Upload addresses, contracts, and visit-report (form) data to see which "
     "accounts have been visited, filtered by DSS, agent, and instalment date."
@@ -210,8 +214,14 @@ except KeyError as exc:
 # ---------------------------------------------------------------------------
 # Main panel: tabs (order: Table View, Email-Ready View, Statistics & Options)
 # ---------------------------------------------------------------------------
-tab_table, tab_email, tab_stats, tab_bulk = st.tabs(
-    ["📋 Table View", "✉️ Email-Ready View", "📊 Statistics & Options", "📨 Bulk Email Tracker"]
+tab_table, tab_email, tab_stats, tab_bulk, tab_visit_status = st.tabs(
+    [
+        "📋 Table View",
+        "✉️ Email-Ready View",
+        "📊 Statistics & Options",
+        "📨 Bulk Email Tracker",
+        "📈 Visit Status per DSS",
+    ]
 )
 
 # --- Table View tab: column/sort controls are defined here first, since --
@@ -416,7 +426,95 @@ with tab_bulk:
         )
     else:
         st.info("No agents with rows found for the current date window / row-inclusion setting.")
-        
+
+# ---------------------------------------------------------------------------
+# Visit Status per DSS tab
+#
+# Ports the coverage calculation from visit_stats_peragent.ipynb: among each
+# agent's accounts overdue by at least N days, what fraction has actually
+# been visited? Independent of the sidebar's date window (it looks back
+# from each account's own "Days to Instalment" instead), but still honors
+# the sidebar's DSS/Superior and Agent filters.
+# ---------------------------------------------------------------------------
+with tab_visit_status:
+    st.subheader("Visit status per DSS")
+    st.caption(
+        "Coverage of overdue accounts, per agent: of the accounts that came "
+        "due at least N days ago, how many has the agent actually visited? "
+        "This is independent of the date window in the sidebar."
+    )
+
+    lookback_days = st.number_input(
+        "Overdue threshold (days since instalment came due)",
+        min_value=1,
+        max_value=365,
+        value=DEFAULT_OVERDUE_LOOKBACK_DAYS,
+        step=1,
+        help=(
+            "An account counts as 'due' for this tab once its Days to "
+            "Instalment is at or below the negative of this number "
+            "(e.g. 20 → accounts overdue by 20+ days)."
+        ),
+    )
+
+    dss_groups = compute_visit_stats_by_dss(
+        reference_data=reference_data,
+        form_data=form_data,
+        dss_filter=dss_filter,
+        agents_filter=agents_filter,
+        lookback_days=int(lookback_days),
+    )
+
+    if not dss_groups:
+        st.warning("No DSS/Superior groups found in the data.")
+
+    groups_with_table = [g for g in dss_groups if not g.stats_df.empty]
+    groups_without_overdue = [
+        g for g in dss_groups if g.stats_df.empty and g.agents_with_no_due_dates
+    ]
+    # Groups with zero agents in scope at all are skipped entirely — nothing
+    # meaningful to show for them.
+
+    for group in groups_with_table:
+        st.divider()
+        st.markdown(f"### {group.superior}")
+
+        if group.weighted_average_coverage is not None:
+            st.metric(
+                "Weighted average visit coverage",
+                f"{group.weighted_average_coverage:.1%}",
+                help="Weighted by each agent's total due-date count, not a plain average of percentages.",
+            )
+
+        display_stats_df = append_weighted_average_row(group.stats_df)
+        st.dataframe(
+            style_visit_stats_table(display_stats_df),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        if group.agents_with_no_due_dates:
+            with st.expander(
+                f"ℹ️ {len(group.agents_with_no_due_dates)} agent(s) under {group.superior} "
+                f"with no accounts overdue by {int(lookback_days)}+ days"
+            ):
+                for agent_name in group.agents_with_no_due_dates:
+                    st.markdown(f"- {agent_name}")
+
+    if groups_without_overdue:
+        st.divider()
+        st.markdown("### Superiors with no overdue accounts for any agent")
+        st.caption(
+            f"These DSS/Superior groups have agents in scope, but none of "
+            f"them have accounts overdue by {int(lookback_days)}+ days."
+        )
+        for group in groups_without_overdue:
+            with st.expander(
+                f"{group.superior} — {len(group.agents_with_no_due_dates)} agent(s), none overdue"
+            ):
+                for agent_name in group.agents_with_no_due_dates:
+                    st.markdown(f"- {agent_name}")
+
 st.markdown(
     """
     <style>
