@@ -134,7 +134,7 @@ with st.sidebar.expander("2. Filters", expanded=True):
     visit_inclusion = st.radio(
         "Include which rows?",
         ["All", "Visited only", "Not visited only"],
-        index=0,
+        index=2,
     )
 
 # ---------------------------------------------------------------------------
@@ -255,7 +255,7 @@ with tab_table:
             display_df#, report_date=selection_date
         )
         st.download_button(
-            "⬇️ Download table as Excel (.xlsx)",
+            f"⬇️ Download table as Excel (visit_views_DSS[{dss_filter}]_agent[{agents_filter}].xlsx)",
             data=report_bytes,
             file_name=f"visit_views_DSS[{dss_filter}]_agent[{agents_filter}].xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
