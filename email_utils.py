@@ -27,6 +27,14 @@ from report_builder import build_email_table_html
 
 DEFAULT_SUBJECT = "PAALALA: Mga Due Date ng Client Repayment + Store Visit Check-in Survey"
 
+# Prepended above the table when an agent has no email on file and the job
+# is rerouted to their DSS/superior instead (terminated-SA handoff notice).
+SUPERIOR_FALLBACK_NOTICE = (
+    '<p><b><span style="color: red;">'
+    "Narito ang mga contracts ng iyong mga dating SA na na-terminate. "
+    "Paki-disseminate ito sa iyong mga kasalukuyang SA..</span></b></p>"
+)
+
 PERSON_COL_CANDIDATES = ["Person", "Name", "Agent", "AGENT", "agent"]
 EMAIL_COL_CANDIDATES = ["Email", "EMAIL", "email", "Email Address", "email address"]
 
@@ -84,7 +92,8 @@ class AgentEmailJob:
     display_df: pd.DataFrame = field(repr=False, default=None)
     html_body: str = field(default="", repr=False)
     subject: str = ""
-    status: str = "Ready"          # Missing email / Ready
+    status: str = "Ready"          # Missing email / Ready / Ready (superior fallback)
+    fallback_to_superior: bool = False  # True if agent had no email and job was rerouted to their superior
 
 
 def _build_html_body(job_display_df: pd.DataFrame) -> str:
@@ -169,25 +178,45 @@ def build_tracker(
         email = normalized_map.get(_normalize_name(agent))
         superior_email = normalized_map.get(_normalize_name(superior)) if superior else None
 
-        cc_emails = [superior_email] if superior_email else []
+        # If the agent (e.g. a terminated SA) has no email on file, reroute
+        # the job to their DSS/superior instead of dropping it: send it to
+        # the superior's address, under the superior's name, with a notice
+        # prepended above the table.
+        fallback_to_superior = False
+        recipient_name = agent
+        recipient_email = email
+        if not email and superior_email:
+            fallback_to_superior = True
+            recipient_name = superior
+            recipient_email = superior_email
+
+        cc_emails = [superior_email] if (superior_email and not fallback_to_superior) else []
         for cc in default_cc_list:
             if cc and cc not in cc_emails:
                 cc_emails.append(cc)
-        # Never CC the agent their own report is addressed to.
-        cc_emails = [c for c in cc_emails if c != email]
+        # Never CC the recipient their own report is addressed to.
+        cc_emails = [c for c in cc_emails if c != recipient_email]
+
+        if recipient_email:
+            status = "Ready (superior fallback)" if fallback_to_superior else "Ready"
+        else:
+            status = "Missing email"
 
         job = AgentEmailJob(
             superior=str(superior),
-            agent=str(agent),
-            email=email,
+            agent=str(recipient_name),
+            email=recipient_email,
             cc_emails=cc_emails,
             row_count=len(result_clean),
             display_df=result_clean,
             subject=subject,
-            status="Ready" if email else "Missing email",
+            status=status,
+            fallback_to_superior=fallback_to_superior,
         )
-        if email:
+        if recipient_email:
             job.html_body = _build_html_body(result_clean)
+            if fallback_to_superior:
+                job.html_body = SUPERIOR_FALLBACK_NOTICE + job.html_body
         jobs.append(job)
 
     return jobs
@@ -261,6 +290,7 @@ def tracker_to_dataframe(jobs: list) -> pd.DataFrame:
     """Render the list of AgentEmailJob into the DataFrame shown in the UI."""
     status_icons = {
         "Ready": "\u23f3 Ready",
+        "Ready (superior fallback)": "\U0001f501 Rerouted to superior",
         "Missing email": "\u26a0\ufe0f Missing email",
     }
     if not jobs:
